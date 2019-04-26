@@ -1,0 +1,144 @@
+---
+- hosts: hypervisor
+  gather_facts: no
+  environment:
+    GOPATH: /home/fedora/go
+  vars:
+    install_dir: /home/fedora/go/src/github.com/openshift/installer
+  tasks:
+    - name: check for nested kvm
+      command: cat /sys/module/kvm_intel/parameters/nested
+      changed_when: false
+      register: nested_kvm
+
+    - name: activate nested kvm
+      when: nested_kvm.stdout == "N"
+      block:
+        - name: Reload module
+          shell: "modprobe -r kvm_intel && modprobe kvm_intel nested=1"
+          become: yes
+        - name: Configure modules.d
+          copy:
+            content: "options kvm_intel nested=1\n"
+            dest: /etc/modprobe.d/kvm.conf
+          become: yes
+
+    - name: update packages
+      become: yes
+      dnf:
+        name: "*"
+        state: latest
+
+    - name: install package
+      become: yes
+      dnf:
+        name:
+          - libvirt
+          - libvirt-devel
+          - libvirt-daemon-kvm
+          - qemu-kvm
+          - make
+          - git
+          - golang
+
+    - name: create keypair
+      command: ssh-keygen -N '' -f /home/fedora/.ssh/id_rsa
+      args:
+        creates: /home/fedora/.ssh/id_rsa
+
+    - name: Clone installer
+      git:
+        repo: https://github.com/openshift/installer.git
+        dest: "{{ install_dir }}"
+
+    - name: setup libvirt rule
+      become: yes
+      copy:
+        content: |
+          polkit.addRule(function(action, subject) {
+            if (action.id == "org.libvirt.unix.manage" && subject.local && subject.active && subject.isInGroup("wheel")) {
+              return polkit.Result.YES;
+            }
+          });
+        dest: /etc/polkit-1/rules.d/80-libvirt.rules
+
+    - name: enable ip forward
+      become: yes
+      copy:
+        content: net.ipv4.ip_forward = 1
+        dest: /etc/sysctl.d/99-ipforward.conf
+
+    - name: apply ip forward
+      become: yes
+      command: sysctl -p /etc/sysctl.d/99-ipforward.conf
+
+    - name: configure libvirt
+      become: yes
+      lineinfile:
+        path: /etc/libvirt/libvirtd.conf
+        line: "{{ item }}"
+      with_items:
+        - "listen_tls = 0"
+        - "listen_tcp = 1"
+        - auth_tcp="none"
+        - tcp_port="16509"
+
+    - name: enable tcp listen
+      become: yes
+      lineinfile:
+        path: /etc/sysconfig/libvirtd
+        line: LIBVIRTD_ARGS="--listen"
+
+    - name: configure nm
+      become: yes
+      copy:
+        content: |
+          [main]
+          dns=dnsmasq
+        dest: /etc/NetworkManager/conf.d/openshift.conf
+
+    - name: configure dnsmasqk
+      become: yes
+      copy:
+        content: server=/tt.testing/192.168.126.1
+        dest: /etc/NetworkManager/dnsmasq.d/openshift.conf
+
+    - name: reload nm service
+      become: yes
+      service:
+        name: NetworkManager
+        state: reloaded
+
+    - name: restart libvirtd
+      become: yes
+      service:
+        name: libvirtd
+        state: restarted
+
+    - name: configure virsh pool
+      become: yes
+      command: virsh pool-define /dev/stdin
+      args:
+        stdin: |
+          <pool type='dir'>
+            <name>default</name>
+            <target>
+              <path>/var/lib/libvirt/images</path>
+            </target>
+          </pool>
+
+    - name: start virsh pool
+      become: yes
+      command: virsh pool-start default
+
+    - name: autostart virsh pool
+      become: yes
+      command: virsh pool-autostart default
+
+    - name: build installer
+      command: hack/build.sh
+      environment:
+        TAGS: libvirt
+      args:
+        chdir: "{{ install_dir }}"
+        creates: "{{ install_dir }}/bin/openshift-install"
