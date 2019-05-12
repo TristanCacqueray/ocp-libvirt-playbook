@@ -1,10 +1,11 @@
----
 - hosts: hypervisor
   gather_facts: no
   environment:
     GOPATH: /home/fedora/go
   vars:
+    CARGOPATH: /home/fedora/.cargo
     install_dir: /home/fedora/go/src/github.com/openshift/installer
+    local_bin: /home/fedora/.local/bin
   tasks:
     - name: check for nested kvm
       command: cat /sys/module/kvm_intel/parameters/nested
@@ -40,16 +41,12 @@
           - make
           - git
           - golang
+          - cargo
 
     - name: create keypair
       command: ssh-keygen -N '' -f /home/fedora/.ssh/id_rsa
       args:
         creates: /home/fedora/.ssh/id_rsa
-
-    - name: Clone installer
-      git:
-        repo: https://github.com/openshift/installer.git
-        dest: "{{ install_dir }}"
 
     - name: setup libvirt rule
       become: yes
@@ -103,11 +100,11 @@
         content: server=/tt.testing/192.168.126.1
         dest: /etc/NetworkManager/dnsmasq.d/openshift.conf
 
-    - name: reload nm service
+    - name: restart nm service
       become: yes
       service:
         name: NetworkManager
-        state: reloaded
+        state: restarted
 
     - name: restart libvirtd
       become: yes
@@ -135,10 +132,42 @@
       become: yes
       command: virsh pool-autostart default
 
-    - name: build installer
+    - name: Clone installer
+      git:
+        repo: https://github.com/openshift/installer.git
+        dest: "{{ install_dir }}"
+
+    - name: Build installer
       command: hack/build.sh
       environment:
         TAGS: libvirt
       args:
         chdir: "{{ install_dir }}"
         creates: "{{ install_dir }}/bin/openshift-install"
+
+    - name: Create local bin
+      file:
+        path: "{{ local_bin }}"
+        state: directory
+
+    - name: Install installer
+      file:
+        src: "{{ install_dir }}/bin/openshift-install"
+        dest: "{{ local_bin }}/openshift-install"
+        state: link
+
+    - name: Clone cli
+      git:
+        repo: https://github.com/cgwalters/xokdinst
+        dest: xokdinst
+
+    - name: Build cli
+      command: cargo install --path .
+      args:
+        chdir: xokdinst
+
+    - name: Install cli
+      file:
+        src: "{{ CARGOPATH }}/bin/xokdinst"
+        dest: "{{ local_bin }}/xokdinst"
+        state: link
