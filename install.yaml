@@ -42,6 +42,9 @@
           - git
           - golang
           - cargo
+          - origin-clients
+          - tmux
+          - vim-enhanced
 
     - name: create keypair
       command: ssh-keygen -N '' -f /home/fedora/.ssh/id_rsa
